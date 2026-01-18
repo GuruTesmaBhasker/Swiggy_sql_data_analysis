@@ -73,10 +73,11 @@ const VegIcon = ({ isVeg }) => (
 
 export default function App() {
   const [view, setView] = useState('home');
-  const [userId, setUserId] = useState('USR_1001');
+  const [userId, setUserId] = useState(1);
   const [selectedLocality, setSelectedLocality] = useState(LOCALITIES[0]);
   const [selectedRestaurant, setSelectedRestaurant] = useState(null);
   const [cart, setCart] = useState([]);
+  const [cartRestaurantId, setCartRestaurantId] = useState(null);
   const [filters, setFilters] = useState({ vegOnly: false, minRating: 0 });
   
   // API fetched data
@@ -85,8 +86,8 @@ export default function App() {
   
   const [currentOrder, setCurrentOrder] = useState(null);
   const [pastOrders, setPastOrders] = useState([
-    { id: 'ORD-7291', restaurant: 'Royal Biryani House', amount: 450, date: '2023-12-01', rating: 5, status: 'Delivered', satisfaction: 'Good', userId: 'USR_1001' },
-    { id: 'ORD-8102', restaurant: 'The Pizza Box', amount: 899, date: '2023-11-28', rating: 4, status: 'Delivered', satisfaction: 'Good', userId: 'USR_1001' }
+    { id: 'ORD-7291', restaurant: 'Royal Biryani House', amount: 450, date: '2023-12-01', rating: 5, status: 'Delivered', satisfaction: 'Good', userId: 1 },
+    { id: 'ORD-8102', restaurant: 'The Pizza Box', amount: 899, date: '2023-11-28', rating: 4, status: 'Delivered', satisfaction: 'Good', userId: 1 }
   ]);
 
   // Fetch restaurants on component mount
@@ -110,37 +111,61 @@ export default function App() {
       .catch(err => console.error("Failed to fetch menu:", err));
   }, [selectedRestaurant]);
 
-  const cartTotal = useMemo(() => cart.reduce((acc, i) => acc + (i.price * i.quantity), 0), [cart]);
+  const cartTotal = useMemo(() => {
+    return cart.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0
+    );
+  }, [cart]);
   const cartCount = useMemo(() => cart.reduce((acc, i) => acc + i.quantity, 0), [cart]);
+
+  // Delivery and platform fees
+  const DELIVERY_FEE = 40;
+  const PLATFORM_FEE = 25;
+  const grandTotal = cartTotal + DELIVERY_FEE + PLATFORM_FEE;
 
   const updateCart = (item, delta) => {
     setCart(prev => {
+      if (prev.length === 0 && delta > 0) {
+        setCartRestaurantId(item.restaurant_id);
+      }
+
+      // BLOCK cross-restaurant items
+      if (cartRestaurantId && item.restaurant_id !== cartRestaurantId) {
+        alert("You can order from only one restaurant at a time");
+        return prev;
+      }
+
       const existing = prev.find(i => i.item_id === item.item_id);
       if (existing) {
         const newQty = existing.quantity + delta;
-        if (newQty <= 0) return prev.filter(i => i.item_id !== item.item_id);
-        return prev.map(i => i.item_id === item.item_id ? { ...i, quantity: newQty } : i);
+        if (newQty <= 0) {
+          const updated = prev.filter(i => i.item_id !== item.item_id);
+          if (updated.length === 0) setCartRestaurantId(null);
+          return updated;
+        }
+        return prev.map(i =>
+          i.item_id === item.item_id ? { ...i, quantity: newQty } : i
+        );
       }
+
       return [...prev, { ...item, quantity: 1 }];
     });
   };
 
   const placeOrder = async () => {
-    // TEMP user (since no login)
-    const userId = 1;
-
-    // Build items payload from cart - ONLY item_id and quantity
+    // Build items payload from cart
     const itemsPayload = cart.map(item => ({
-      item_id: item.item_id,  // ✅ Use database ID from API
-      quantity: item.quantity
-      // ❌ NO item_price - backend will fetch from DB
+      item_id: item.item_id,
+      quantity: item.quantity,
+      item_price: item.price
     }));
 
     const orderData = {
-      user_id: userId,
-      restaurant_id: selectedRestaurant.restaurant_id,  // ✅ Use API field
+      user_id: userId, // ✅ Use state userId (can be changed in UI)
+      restaurant_id: cartRestaurantId,
+      total_amount: cartTotal, // 👈 SAME VALUE
       items: itemsPayload
-      // ❌ NO total_amount - backend will calculate
     };
 
     try {
@@ -156,17 +181,61 @@ export default function App() {
 
       if (response.ok) {
         console.log("Order success:", data);
+        setCurrentOrder({
+          order_id: data.order_id,
+          amount: cartTotal,
+          rating: 0,
+          satisfaction: null
+        });
         setView("tracking"); // go to tracking page
-        setCart([]); // clear cart
+        setCart([]);
+        setCartRestaurantId(null);
       } else {
         console.error("Order failed:", data);
-        alert("Order failed. Check backend.");
+        if (data.error && data.error.includes("foreign key constraint")) {
+          alert(`User ID ${userId} doesn't exist in database. Please use an existing user ID (1, 2, 3) or create this user first.`);
+        } else {
+          alert("Order failed. Check backend.");
+        }
       }
 
     } catch (error) {
       console.error("Backend not reachable:", error);
       alert("Backend not running!");
     }
+  };
+
+  const handleRating = async (rating) => {
+    setCurrentOrder(prev => ({ ...prev, rating }));
+    
+    // Send rating to backend (reviews table)
+    try {
+      console.log("Sending rating:", {
+        order_id: currentOrder?.order_id,
+        rating: rating
+      });
+      
+      const response = await fetch("http://127.0.0.1:5000/rating", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          order_id: currentOrder?.order_id,
+          rating: rating
+        })
+      });
+      
+      const result = await response.json();
+      console.log("Rating response:", result);
+      
+    } catch (error) {
+      console.error("Failed to submit rating:", error);
+    }
+  };
+
+  const handleSatisfaction = (satisfaction) => {
+    setCurrentOrder(prev => ({ ...prev, satisfaction }));
   };
 
   const renderHome = () => (
@@ -305,9 +374,23 @@ export default function App() {
               </div>
             ))}
             <div className="pt-4 border-t border-gray-50 space-y-2 text-xs font-medium text-gray-500">
+              <div className="flex justify-between">
+                <span>Item Total</span>
+                <span>₹{cartTotal}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Delivery Fee</span>
+                <span>₹{DELIVERY_FEE}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Platform Fee</span>
+                <span>₹{PLATFORM_FEE}</span>
+              </div>
               <div className="flex justify-between text-base font-black text-gray-900 pt-2">
                 <span>Grand Total</span>
-                <span className="text-[#FC8019]">₹{cartTotal + 65}</span>
+                <span className="text-[#E23744] font-bold">
+                  ₹{grandTotal}
+                </span>
               </div>
             </div>
           </div>
@@ -327,7 +410,8 @@ export default function App() {
       <div className="bg-white p-10 rounded-3xl border border-gray-100 shadow-sm">
         <div className="w-16 h-16 bg-green-50 text-green-600 rounded-full flex items-center justify-center mx-auto mb-4"><CheckCircle2 size={32} /></div>
         <h2 className="text-2xl font-black">Order Placed!</h2>
-        <p className="text-gray-400 font-mono text-sm mt-1 uppercase">{currentOrder?.id}</p>
+        <p className="text-gray-400 font-mono text-sm mt-1 uppercase">{currentOrder?.order_id}</p>
+        <p className="text-gray-500 mt-2 text-lg font-bold">₹{currentOrder?.amount}</p>
         <p className="text-gray-500 mt-4 text-sm font-medium">Ordering as: {userId}</p>
       </div>
       <div className="bg-white p-8 rounded-3xl border border-gray-100 shadow-sm space-y-6">
@@ -363,9 +447,9 @@ export default function App() {
             <p className="text-[10px] uppercase font-bold mb-2 opacity-70">Manual User ID Switcher</p>
             <div className="flex gap-2">
               <input 
-                type="text" 
+                type="number" 
                 value={userId} 
-                onChange={(e) => setUserId(e.target.value)}
+                onChange={(e) => setUserId(parseInt(e.target.value) || 1)}
                 className="bg-white/20 border border-white/20 rounded-lg px-3 py-1 text-sm outline-none focus:bg-white/30 flex-1 font-mono"
               />
               <div className="p-1.5 bg-white/10 rounded-lg"><Edit2 size={14}/></div>

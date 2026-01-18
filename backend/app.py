@@ -170,5 +170,43 @@ def create_order():
             conn.close()
 
 
+@app.route("/rating", methods=["POST"])
+def submit_rating():
+    conn = None
+    cursor = None
+    try:
+        data = request.json
+        order_id = data["order_id"]
+        rating = data["rating"]
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Insert or update rating in reviews table
+        cursor.execute("""
+            INSERT INTO reviews (order_id, rating)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE rating = %s
+        """, (order_id, rating, rating))
+        
+        conn.commit()
+        
+        return jsonify({
+            "message": "Rating submitted successfully",
+            "order_id": order_id,
+            "rating": rating
+        }), 200
+        
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
 if __name__ == "__main__":
     app.run(debug=True)
